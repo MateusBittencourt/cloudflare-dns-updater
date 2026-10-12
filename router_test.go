@@ -53,7 +53,7 @@ func TestRouterEnsureMapping(t *testing.T) {
 				io.WriteString(w, "function LoginSubmit() {}")
 				return
 			}
-			fmt.Fprintf(w, `new stPortMap("Device.PortForward.2","1","%s","","","nginx")`, strings.ReplaceAll(currentIP, ":", `\x3a`))
+			fmt.Fprintf(w, `<input type="hidden" name="onttoken" id="hwonttoken" value="abcdef0123456789abcdef0123456789">new stPortMap("Device.PortForward.2","1","%s","","","nginx")`, strings.ReplaceAll(currentIP, ":", `\x3a`))
 		case "/html/bbsp/ipv6portmapping/complex.cgi":
 			if err := r.ParseForm(); err != nil {
 				t.Fatal(err)
@@ -61,7 +61,7 @@ func TestRouterEnsureMapping(t *testing.T) {
 			if r.URL.Query().Get("x") != "Device.PortForward.2" {
 				t.Errorf("unexpected mapping domain: %s", r.URL.RawQuery)
 			}
-			if r.Form.Get("x.Description") != "nginx" || r.Form.Get("x.X_HW_Token") != "csrf-token" {
+			if r.Form.Get("x.Description") != "nginx" || r.Form.Get("x.X_HW_Token") != "abcdef0123456789abcdef0123456789" {
 				t.Errorf("unexpected update form: %v", r.Form)
 			}
 			currentIP = r.Form.Get("x.InternalClient")
@@ -89,6 +89,26 @@ func TestRouterEnsureMapping(t *testing.T) {
 	changed, _, err = client.ensureMapping(context.Background(), "nginx", want)
 	if err != nil || changed || updateCount != 1 {
 		t.Fatalf("second check: changed=%v updates=%d err=%v", changed, updateCount, err)
+	}
+}
+
+func TestAuthenticatedTokenFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/html/ssmp/common/GetRandToken.asp" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, `var token = "0123456789abcdef0123456789abcdef";`)
+	}))
+	defer server.Close()
+
+	client, err := newRouterClient(routerConfig{baseURL: server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := client.authenticatedToken(context.Background(), "page without a token")
+	if err != nil || token != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("authenticatedToken() = %q, %v", token, err)
 	}
 }
 

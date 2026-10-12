@@ -67,6 +67,12 @@ type routerMapping struct {
 
 var mappingPattern = regexp.MustCompile(`new\s+stPortMap\("((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)"\)`)
 
+var (
+	pageTokenPattern  = regexp.MustCompile(`(?i)id=["']hwonttoken["'][^>]*value=["']([a-z0-9]+)["']`)
+	pageTokenPattern2 = regexp.MustCompile(`(?i)value=["']([a-z0-9]+)["'][^>]*id=["']hwonttoken["']`)
+	rawTokenPattern   = regexp.MustCompile(`(?i)[a-f0-9]{32,64}`)
+)
+
 func newRouterClient(cfg routerConfig, httpClient *http.Client) (*routerClient, error) {
 	base, err := url.Parse(cfg.baseURL)
 	if err != nil || base.Scheme == "" || base.Host == "" {
@@ -98,7 +104,11 @@ func (c *routerClient) ensureMapping(ctx context.Context, name string, ip netip.
 	if current, err := netip.ParseAddr(old); err == nil && current == ip {
 		return false, old, nil
 	}
-	if err := c.updateMapping(ctx, mapping, ip.String()); err != nil {
+	token, err := c.authenticatedToken(ctx, page)
+	if err != nil {
+		return false, old, fmt.Errorf("get authenticated request token: %w", err)
+	}
+	if err := c.updateMapping(ctx, mapping, ip.String(), token); err != nil {
 		return false, old, err
 	}
 	page, err = c.mappingPage(ctx)
@@ -152,15 +162,28 @@ func (c *routerClient) token(ctx context.Context) (string, error) {
 	return token, nil
 }
 
+func (c *routerClient) authenticatedToken(ctx context.Context, page string) (string, error) {
+	for _, pattern := range []*regexp.Regexp{pageTokenPattern, pageTokenPattern2} {
+		if match := pattern.FindStringSubmatch(page); len(match) == 2 {
+			return match[1], nil
+		}
+	}
+	body, err := c.request(ctx, http.MethodGet, "/html/ssmp/common/GetRandToken.asp", nil)
+	if err != nil {
+		return "", err
+	}
+	tokens := rawTokenPattern.FindAllString(body, -1)
+	if len(tokens) == 0 {
+		return "", fmt.Errorf("router returned no authenticated token")
+	}
+	return tokens[len(tokens)-1], nil
+}
+
 func (c *routerClient) mappingPage(ctx context.Context) (string, error) {
 	return c.request(ctx, http.MethodGet, routerMappingPath, nil)
 }
 
-func (c *routerClient) updateMapping(ctx context.Context, mapping routerMapping, newIP string) error {
-	token, err := c.token(ctx)
-	if err != nil {
-		return err
-	}
+func (c *routerClient) updateMapping(ctx context.Context, mapping routerMapping, newIP, token string) error {
 	query := url.Values{
 		"x":           {mapping.domain},
 		"RequestFile": {strings.TrimPrefix(routerMappingPath, "/")},
@@ -174,7 +197,7 @@ func (c *routerClient) updateMapping(ctx context.Context, mapping routerMapping,
 		"x.X_HW_Token":      {token},
 	}
 	endpoint := "/html/bbsp/ipv6portmapping/complex.cgi?" + query.Encode()
-	_, err = c.request(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	_, err := c.request(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	return err
 }
 
@@ -194,7 +217,18 @@ func (c *routerClient) request(ctx context.Context, method, path string, body io
 	if path == "/login.cgi" {
 		req.AddCookie(&http.Cookie{Name: "Cookie", Value: "body:Language:english:id=-1", Path: "/"})
 	}
-	req.Header.Set("Referer", c.baseURL.ResolveReference(&url.URL{Path: routerMappingPath}).String())
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("User-Agent", "cloudflare-dns-updater/1.0")
+	if method == http.MethodPost {
+		req.Header.Set("Origin", strings.TrimRight(c.baseURL.String(), "/"))
+	}
+	if path == "/login.cgi" {
+		req.Header.Set("Referer", c.baseURL.String())
+	} else {
+		req.Header.Set("Referer", c.baseURL.ResolveReference(&url.URL{Path: routerMappingPath}).String())
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", err
@@ -205,7 +239,7 @@ func (c *routerClient) request(ctx context.Context, method, path string, body io
 		return "", err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("router returned HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("%s %s: router returned HTTP %d", method, endpoint.Path, resp.StatusCode)
 	}
 	return string(data), nil
 }
