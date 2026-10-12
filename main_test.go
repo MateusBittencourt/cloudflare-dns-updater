@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsPublicIPv6(t *testing.T) {
@@ -22,6 +23,33 @@ func TestIsPublicIPv6(t *testing.T) {
 		if got := isPublicIPv6(netip.MustParseAddr(raw)); got != want {
 			t.Errorf("isPublicIPv6(%s) = %v, want %v", raw, got, want)
 		}
+	}
+}
+
+func TestShouldFullCheck(t *testing.T) {
+	ip := netip.MustParseAddr("2001:db8::1")
+	other := netip.MustParseAddr("2001:db8::2")
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		cachedIP   netip.Addr
+		last       time.Time
+		want       bool
+		wantReason string
+	}{
+		{name: "startup", want: true, wantReason: "startup"},
+		{name: "address changed", cachedIP: other, last: now.Add(-time.Hour), want: true, wantReason: "IPv6 address changed"},
+		{name: "daily verification", cachedIP: ip, last: now.Add(-24 * time.Hour), want: true, wantReason: "periodic verification"},
+		{name: "unchanged", cachedIP: ip, last: now.Add(-time.Hour), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, reason := shouldFullCheck(tt.cachedIP, ip, tt.last, now, 24*time.Hour)
+			if got != tt.want || reason != tt.wantReason {
+				t.Fatalf("shouldFullCheck() = %v, %q; want %v, %q", got, reason, tt.want, tt.wantReason)
+			}
+		})
 	}
 }
 

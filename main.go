@@ -28,6 +28,7 @@ type config struct {
 	records   []string
 	iface     string
 	interval  time.Duration
+	fullCheck time.Duration
 	apiURL    string
 	routeAddr string
 	router    routerConfig
@@ -89,17 +90,38 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	run := func() error {
+	var cachedIP netip.Addr
+	var lastFullCheck time.Time
+	run := func(force bool) error {
 		checkCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
-		if err := checkAndUpdate(checkCtx, cfg, client, router, logger); err != nil {
+		ip, err := discoverIPv6(cfg.iface, cfg.routeAddr)
+		if err != nil {
+			err = fmt.Errorf("discover IPv6 address: %w", err)
 			logger.Error("update check failed", "error", err)
 			return err
 		}
+		now := time.Now()
+		full, reason := shouldFullCheck(cachedIP, ip, lastFullCheck, now, cfg.fullCheck)
+		if force {
+			full, reason = true, "forced"
+		}
+		if !full {
+			logger.Debug("local IPv6 address is unchanged", "address", ip)
+			return nil
+		}
+		logger.Info("starting full reconciliation", "reason", reason, "address", ip)
+		if err := reconcile(checkCtx, ip, cfg, client, router, logger); err != nil {
+			logger.Error("update check failed", "error", err)
+			return err
+		}
+		cachedIP = ip
+		lastFullCheck = now
+		logger.Info("full reconciliation completed", "address", ip)
 		return nil
 	}
 
-	firstErr := run()
+	firstErr := run(true)
 	if *once {
 		if firstErr != nil {
 			os.Exit(1)
@@ -115,7 +137,7 @@ func main() {
 			logger.Info("shutting down")
 			return
 		case <-ticker.C:
-			_ = run()
+			_ = run(false)
 		}
 	}
 }
@@ -148,6 +170,11 @@ func loadConfig() (config, error) {
 		return cfg, fmt.Errorf("CHECK_INTERVAL must be a positive Go duration (for example 5m)")
 	}
 	cfg.interval = interval
+	fullCheck, err := time.ParseDuration(envOr("FULL_CHECK_INTERVAL", "24h"))
+	if err != nil || fullCheck <= 0 {
+		return cfg, fmt.Errorf("FULL_CHECK_INTERVAL must be a positive Go duration (for example 24h)")
+	}
+	cfg.fullCheck = fullCheck
 
 	var missing []string
 	if cfg.token == "" {
@@ -175,13 +202,7 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
-func checkAndUpdate(ctx context.Context, cfg config, client *cloudflareClient, router *routerClient, logger *slog.Logger) error {
-	ip, err := discoverIPv6(cfg.iface, cfg.routeAddr)
-	if err != nil {
-		return fmt.Errorf("discover IPv6 address: %w", err)
-	}
-	logger.Info("discovered public IPv6 address", "address", ip)
-
+func reconcile(ctx context.Context, ip netip.Addr, cfg config, client *cloudflareClient, router *routerClient, logger *slog.Logger) error {
 	var failures []error
 	for _, name := range cfg.records {
 		record, err := client.findAAAA(ctx, cfg.zoneID, name)
@@ -214,6 +235,19 @@ func checkAndUpdate(ctx context.Context, cfg config, client *cloudflareClient, r
 		}
 	}
 	return errors.Join(failures...)
+}
+
+func shouldFullCheck(cachedIP, currentIP netip.Addr, lastFullCheck, now time.Time, interval time.Duration) (bool, string) {
+	if !cachedIP.IsValid() || lastFullCheck.IsZero() {
+		return true, "startup"
+	}
+	if cachedIP != currentIP {
+		return true, "IPv6 address changed"
+	}
+	if !now.Before(lastFullCheck.Add(interval)) {
+		return true, "periodic verification"
+	}
+	return false, ""
 }
 
 func discoverIPv6(interfaceName, routeAddr string) (netip.Addr, error) {

@@ -1,6 +1,6 @@
 # Cloudflare IPv6 DNS updater
 
-A small, dependency-free service that keeps existing Cloudflare `AAAA` records pointed at this server's public IPv6 address. It asks the Linux kernel which source address it would use for a public IPv6 route, checks each configured record, and only calls Cloudflare when an address differs.
+A small, dependency-free service that keeps existing Cloudflare `AAAA` records and optional Huawei router mappings pointed at this server's public IPv6 address. It checks the local address frequently without making network API calls, and performs a full reconciliation at startup, when the address changes, or once per day as a safety check.
 
 ## Cloudflare setup
 
@@ -55,7 +55,8 @@ sudo sh -c 'set -a; . /etc/cloudflare-dns-updater.env; set +a; exec runuser -u c
 | `CF_API_TOKEN` | yes | | Scoped Cloudflare API token |
 | `CF_ZONE_ID` | yes | | Cloudflare zone ID |
 | `CF_RECORDS` | yes | | Comma-separated, existing AAAA record names |
-| `CHECK_INTERVAL` | no | `5m` | Check frequency as a Go duration |
+| `CHECK_INTERVAL` | no | `5m` | Frequency of the cheap local IPv6/cache comparison |
+| `FULL_CHECK_INTERVAL` | no | `24h` | Maximum time between Cloudflare/router reconciliations |
 | `IPV6_INTERFACE` | no | | Pin address discovery to an interface, such as `eth0` |
 | `IPV6_ROUTE_PROBE` | no | `[2606:4700:4700::1111]:53` | IPv6 destination used only to ask the kernel for source-address selection |
 | `CF_API_URL` | no | Cloudflare API v4 | Override intended for tests |
@@ -65,6 +66,8 @@ sudo sh -c 'set -a; . /etc/cloudflare-dns-updater.env; set +a; exec runuser -u c
 | `ROUTER_IPV6_MAPPINGS` | with router integration | | Comma-separated existing IPv6 mapping names |
 
 The route probe opens an unconnected-to-application UDP socket; it sends no DNS request. If `IPV6_INTERFACE` is set, the first public IPv6 address on that interface is used instead. The updater rejects IPv4, loopback, link-local, and unique-local (`fc00::/7`) addresses.
+
+The address cache is intentionally kept in memory. Every service start performs a full reconciliation, so no stale cache file can suppress checks after a reboot or upgrade. The cache is updated only after Cloudflare and all configured router mappings reconcile successfully; a failed full check is retried at the next `CHECK_INTERVAL`.
 
 ## Huawei EG8145V5-V2 IPv6 mappings
 
