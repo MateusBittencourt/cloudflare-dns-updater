@@ -59,8 +59,27 @@ sudo sh -c 'set -a; . /etc/cloudflare-dns-updater.env; set +a; exec runuser -u c
 | `IPV6_INTERFACE` | no | | Pin address discovery to an interface, such as `eth0` |
 | `IPV6_ROUTE_PROBE` | no | `[2606:4700:4700::1111]:53` | IPv6 destination used only to ask the kernel for source-address selection |
 | `CF_API_URL` | no | Cloudflare API v4 | Override intended for tests |
+| `ROUTER_URL` | no | | Huawei router URL, such as `http://192.168.18.1` |
+| `ROUTER_USERNAME` | with router integration | | Router web-interface username |
+| `ROUTER_PASSWORD` | with router integration | | Router web-interface password |
+| `ROUTER_IPV6_MAPPINGS` | with router integration | | Comma-separated existing IPv6 mapping names |
 
 The route probe opens an unconnected-to-application UDP socket; it sends no DNS request. If `IPV6_INTERFACE` is set, the first public IPv6 address on that interface is used instead. The updater rejects IPv4, loopback, link-local, and unique-local (`fc00::/7`) addresses.
+
+## Huawei EG8145V5-V2 IPv6 mappings
+
+The optional router integration updates existing named IPv6 port mappings after checking Cloudflare. Add the following to `/etc/cloudflare-dns-updater.env`:
+
+```ini
+ROUTER_URL=http://192.168.18.1
+ROUTER_USERNAME=your-router-user
+ROUTER_PASSWORD=your-router-password
+ROUTER_IPV6_MAPPINGS=nginx
+```
+
+The service logs in through the router's local web interface, finds exactly one mapping with each configured name, changes only its internal IPv6 address, and reads the page back to verify the update. It preserves the enabled state, mapping name, remote-host restriction, and existing port/protocol entries. It never creates or deletes router mappings.
+
+This integration is specific to the EG8145V5-V2 web firmware interface and may need adjustment after a router firmware update. The router uses plain HTTP on the LAN, so protect the server and local network. Keep the environment file mode `0640` and rotate credentials that have been disclosed elsewhere.
 
 If Ubuntu privacy addressing gives the server temporary IPv6 addresses, configure a stable address for the reverse proxy or set `IPV6_INTERFACE` after confirming that interface exposes the intended stable address first. The service can follow temporary addresses, but DNS would change more often than necessary.
 
@@ -68,6 +87,7 @@ If Ubuntu privacy addressing gives the server temporary IPv6 addresses, configur
 
 - Records must already exist; the service will not create or delete DNS records.
 - Each configured name must resolve to exactly one Cloudflare AAAA record.
+- Each configured router mapping name must match exactly one existing IPv6 mapping.
 - A failure updating one record does not prevent attempts on the others.
 - The API token is read from a root-owned file and is never logged.
 - Stop the service with `sudo systemctl disable --now cloudflare-dns-updater`.

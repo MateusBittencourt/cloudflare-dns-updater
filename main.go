@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/netip"
 	"net/url"
 	"os"
@@ -29,6 +30,7 @@ type config struct {
 	interval  time.Duration
 	apiURL    string
 	routeAddr string
+	router    routerConfig
 }
 
 type cloudflareClient struct {
@@ -71,13 +73,26 @@ func main() {
 		token:   cfg.token,
 		http:    &http.Client{Timeout: 20 * time.Second},
 	}
+	var router *routerClient
+	if cfg.router.enabled() {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "initialize router session:", err)
+			os.Exit(2)
+		}
+		router, err = newRouterClient(cfg.router, &http.Client{Timeout: 20 * time.Second, Jar: jar})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "configuration error:", err)
+			os.Exit(2)
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	run := func() error {
 		checkCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
-		if err := checkAndUpdate(checkCtx, cfg, client, logger); err != nil {
+		if err := checkAndUpdate(checkCtx, cfg, client, router, logger); err != nil {
 			logger.Error("update check failed", "error", err)
 			return err
 		}
@@ -112,6 +127,16 @@ func loadConfig() (config, error) {
 		iface:     strings.TrimSpace(os.Getenv("IPV6_INTERFACE")),
 		apiURL:    strings.TrimRight(envOr("CF_API_URL", defaultAPIURL), "/"),
 		routeAddr: envOr("IPV6_ROUTE_PROBE", "[2606:4700:4700::1111]:53"),
+		router: routerConfig{
+			baseURL:  strings.TrimSpace(os.Getenv("ROUTER_URL")),
+			username: strings.TrimSpace(os.Getenv("ROUTER_USERNAME")),
+			password: os.Getenv("ROUTER_PASSWORD"),
+		},
+	}
+	for _, name := range strings.Split(os.Getenv("ROUTER_IPV6_MAPPINGS"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			cfg.router.mappings = append(cfg.router.mappings, name)
+		}
 	}
 	for _, name := range strings.Split(os.Getenv("CF_RECORDS"), ",") {
 		if name = strings.TrimSpace(name); name != "" {
@@ -137,6 +162,9 @@ func loadConfig() (config, error) {
 	if len(missing) > 0 {
 		return cfg, fmt.Errorf("missing required environment variable(s): %s", strings.Join(missing, ", "))
 	}
+	if err := cfg.router.validate(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -147,7 +175,7 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
-func checkAndUpdate(ctx context.Context, cfg config, client *cloudflareClient, logger *slog.Logger) error {
+func checkAndUpdate(ctx context.Context, cfg config, client *cloudflareClient, router *routerClient, logger *slog.Logger) error {
 	ip, err := discoverIPv6(cfg.iface, cfg.routeAddr)
 	if err != nil {
 		return fmt.Errorf("discover IPv6 address: %w", err)
@@ -170,6 +198,20 @@ func checkAndUpdate(ctx context.Context, cfg config, client *cloudflareClient, l
 			continue
 		}
 		logger.Info("updated AAAA record", "record", name, "old", record.Content, "new", ip)
+	}
+	if router != nil {
+		for _, name := range cfg.router.mappings {
+			changed, oldIP, err := router.ensureMapping(ctx, name, ip)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("router mapping %s: %w", name, err))
+				continue
+			}
+			if changed {
+				logger.Info("updated router IPv6 mapping", "mapping", name, "old", oldIP, "new", ip)
+			} else {
+				logger.Info("router IPv6 mapping is already current", "mapping", name)
+			}
+		}
 	}
 	return errors.Join(failures...)
 }
