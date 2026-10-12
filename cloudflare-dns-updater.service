@@ -1,0 +1,27 @@
+[Unit]
+Description=Cloudflare IPv6 DNS updater
+Documentation=https://github.com/mateus/cloudflare-dns-updater
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=cloudflare-dns-updater
+Group=cloudflare-dns-updater
+EnvironmentFile=/etc/cloudflare-dns-updater.env
+ExecStart=/usr/local/bin/cloudflare-dns-updater
+Restart=on-failure
+RestartSec=15s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
