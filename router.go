@@ -144,7 +144,8 @@ func (c *routerClient) login(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if strings.Contains(body, "LoginSubmit") || strings.Contains(body, "txt_Username") {
+	if strings.Contains(body, "LoginSubmit") || strings.Contains(body, "txt_Username") ||
+		strings.Contains(body, "Incorrect User Name/Password") {
 		return fmt.Errorf("router rejected the credentials")
 	}
 	return nil
@@ -155,11 +156,11 @@ func (c *routerClient) token(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	token := strings.Trim(strings.TrimSpace(body), "\"'")
-	if token == "" || len(token) > 256 {
+	tokens := rawTokenPattern.FindAllString(body, -1)
+	if len(tokens) == 0 {
 		return "", fmt.Errorf("router returned an invalid request token")
 	}
-	return token, nil
+	return tokens[len(tokens)-1], nil
 }
 
 func (c *routerClient) authenticatedToken(ctx context.Context, page string) (string, error) {
@@ -220,7 +221,7 @@ func (c *routerClient) request(ctx context.Context, method, path string, body io
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
-	req.Header.Set("User-Agent", "cloudflare-dns-updater/1.0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36")
 	if method == http.MethodPost {
 		req.Header.Set("Origin", strings.TrimRight(c.baseURL.String(), "/"))
 	}
@@ -237,6 +238,9 @@ func (c *routerClient) request(ctx context.Context, method, path string, body io
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
 		return "", err
+	}
+	if path == "/login.cgi" && (resp.Request.URL.Path == "/" || resp.Request.URL.Path == "/login.asp") {
+		return "", fmt.Errorf("router rejected the credentials (redirected to %s)", resp.Request.URL.Path)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("%s %s: router returned HTTP %d", method, endpoint.Path, resp.StatusCode)

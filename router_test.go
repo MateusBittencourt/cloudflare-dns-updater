@@ -27,6 +27,7 @@ func TestFindRouterMapping(t *testing.T) {
 
 func TestRouterEnsureMapping(t *testing.T) {
 	const session = "test-session"
+	const loginToken = "0123456789abcdef0123456789abcdef"
 	currentIP := "2001:db8::1"
 	authenticated := false
 	var updateCount int
@@ -36,12 +37,12 @@ func TestRouterEnsureMapping(t *testing.T) {
 		case "/":
 			io.WriteString(w, "login")
 		case "/asp/GetRandCount.asp":
-			io.WriteString(w, "csrf-token")
+			io.WriteString(w, "\n"+loginToken)
 		case "/login.cgi":
 			if err := r.ParseForm(); err != nil {
 				t.Fatal(err)
 			}
-			if r.Form.Get("UserName") != "user" || r.Form.Get("PassWord") != "cGFzcw==" || r.Form.Get("x.X_HW_Token") != "csrf-token" {
+			if r.Form.Get("UserName") != "user" || r.Form.Get("PassWord") != "cGFzcw==" || r.Form.Get("x.X_HW_Token") != loginToken {
 				t.Errorf("unexpected login form: %v", r.Form)
 			}
 			authenticated = true
@@ -116,5 +117,21 @@ func TestRouterConfigAllOrNothing(t *testing.T) {
 	err := (routerConfig{baseURL: "http://router", username: "user"}).validate()
 	if err == nil || !strings.Contains(err.Error(), "ROUTER_PASSWORD") {
 		t.Fatalf("validate() error = %v", err)
+	}
+}
+
+func TestTokenUsesFinalHexValue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `prefix:0123456789abcdef0123456789abcdef`)
+	}))
+	defer server.Close()
+
+	client, err := newRouterClient(routerConfig{baseURL: server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := client.token(context.Background())
+	if err != nil || token != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("token() = %q, %v", token, err)
 	}
 }
