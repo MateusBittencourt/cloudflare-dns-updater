@@ -93,6 +93,48 @@ func TestRouterEnsureMapping(t *testing.T) {
 	}
 }
 
+func TestRouterFallsBackToSetCGI(t *testing.T) {
+	const pageToken = "abcdef0123456789abcdef0123456789"
+	currentIP := "2001:db8::1"
+	var complexCalls, setCalls int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case routerMappingPath:
+			fmt.Fprintf(w, `<input id="hwonttoken" value="%s">new stPortMap("Device.PortForward.2","1","%s","","","nginx")`, pageToken, strings.ReplaceAll(currentIP, ":", `\x3a`))
+		case "/html/bbsp/ipv6portmapping/complex.cgi":
+			complexCalls++
+			http.NotFound(w, r)
+		case "/html/bbsp/ipv6portmapping/set.cgi":
+			setCalls++
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			if r.Form.Get("x.X_HW_Token") != pageToken {
+				t.Errorf("set.cgi token = %q", r.Form.Get("x.X_HW_Token"))
+			}
+			currentIP = r.Form.Get("x.InternalClient")
+			io.WriteString(w, "ok")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newRouterClient(routerConfig{baseURL: server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := netip.MustParseAddr("2001:db8::99")
+	changed, _, err := client.ensureMapping(context.Background(), "nginx", want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || complexCalls != 1 || setCalls != 1 || currentIP != want.String() {
+		t.Fatalf("changed=%v complex=%d set=%d currentIP=%s", changed, complexCalls, setCalls, currentIP)
+	}
+}
+
 func TestAuthenticatedTokenFallback(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/html/ssmp/common/GetRandToken.asp" {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -63,6 +64,16 @@ type routerMapping struct {
 	remoteHost string
 	remoteEnd  string
 	name       string
+}
+
+type routerHTTPError struct {
+	method string
+	path   string
+	status int
+}
+
+func (e *routerHTTPError) Error() string {
+	return fmt.Sprintf("%s %s: router returned HTTP %d", e.method, e.path, e.status)
 }
 
 var mappingPattern = regexp.MustCompile(`new\s+stPortMap\("((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)","((?:\\.|[^"\\])*)"\)`)
@@ -199,7 +210,28 @@ func (c *routerClient) updateMapping(ctx context.Context, mapping routerMapping,
 	}
 	endpoint := "/html/bbsp/ipv6portmapping/complex.cgi?" + query.Encode()
 	_, err := c.request(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
-	return err
+	var httpErr *routerHTTPError
+	if err == nil || !errors.As(err, &httpErr) || httpErr.status != http.StatusNotFound {
+		return err
+	}
+
+	// Some EG8145V5-V2 firmware builds render complex.cgi in the page script
+	// but expose only set.cgi for updates that do not modify child Portlist
+	// objects. Obtain a fresh one-time token before retrying that endpoint.
+	page, pageErr := c.mappingPage(ctx)
+	if pageErr != nil {
+		return fmt.Errorf("complex.cgi unavailable and refresh for set.cgi failed: %w", pageErr)
+	}
+	fallbackToken, tokenErr := c.authenticatedToken(ctx, page)
+	if tokenErr != nil {
+		return fmt.Errorf("complex.cgi unavailable and token for set.cgi failed: %w", tokenErr)
+	}
+	form.Set("x.X_HW_Token", fallbackToken)
+	fallback := "/html/bbsp/ipv6portmapping/set.cgi?" + query.Encode()
+	if _, fallbackErr := c.request(ctx, http.MethodPost, fallback, strings.NewReader(form.Encode())); fallbackErr != nil {
+		return fmt.Errorf("complex.cgi returned HTTP 404; set.cgi fallback failed: %w", fallbackErr)
+	}
+	return nil
 }
 
 func (c *routerClient) request(ctx context.Context, method, path string, body io.Reader) (string, error) {
@@ -243,7 +275,7 @@ func (c *routerClient) request(ctx context.Context, method, path string, body io
 		return "", fmt.Errorf("router rejected the credentials (redirected to %s)", resp.Request.URL.Path)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("%s %s: router returned HTTP %d", method, endpoint.Path, resp.StatusCode)
+		return "", &routerHTTPError{method: method, path: endpoint.Path, status: resp.StatusCode}
 	}
 	return string(data), nil
 }
